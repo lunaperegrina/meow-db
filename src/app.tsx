@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import {
 	addDatabase,
@@ -7,6 +7,7 @@ import {
 } from './storage/databases.js';
 import { listTableRows, listTables } from './storage/postgres.js';
 import type {
+	DatabaseEntry,
 	DatabaseState,
 	TableReference,
 	TableRowsPreview,
@@ -17,6 +18,10 @@ const FALLBACK_ROWS = 24;
 const STATUS_BAR_HEIGHT = 1;
 const INPUT_BAR_HEIGHT = 5;
 const MODAL_HEIGHT = 9;
+const SPLIT_GAP = 2;
+const SIDEBAR_MIN_WIDTH = 24;
+const SIDEBAR_MAX_WIDTH = 44;
+const CONTENT_MIN_WIDTH = 20;
 const ROWS_PREVIEW_LIMIT = 50;
 const ROW_NUMBER_WIDTH = 4;
 const CELL_MIN_WIDTH = 8;
@@ -32,13 +37,50 @@ const getTerminalSize = (stdout: NodeJS.WriteStream) => ({
 	rows: stdout.rows && stdout.rows > 0 ? stdout.rows : FALLBACK_ROWS,
 });
 
+const getSplitPaneSizes = (
+	terminalColumns: number,
+	hasActiveDatabase: boolean,
+): {
+	mainWidth: number;
+	sidebarWidth: number;
+	contentWidth: number;
+} => {
+	const mainWidth = Math.max(24, terminalColumns - 2);
+	if (!hasActiveDatabase) {
+		return {
+			mainWidth,
+			sidebarWidth: 0,
+			contentWidth: mainWidth,
+		};
+	}
+
+	const preferredSidebar = Math.floor(mainWidth * 0.34);
+	const boundedSidebar = Math.min(
+		SIDEBAR_MAX_WIDTH,
+		Math.max(SIDEBAR_MIN_WIDTH, preferredSidebar),
+	);
+	const maxSidebarForContent = Math.max(
+		SIDEBAR_MIN_WIDTH,
+		mainWidth - CONTENT_MIN_WIDTH - SPLIT_GAP,
+	);
+	const sidebarWidth = Math.min(boundedSidebar, maxSidebarForContent);
+	const contentWidth = Math.max(
+		CONTENT_MIN_WIDTH,
+		mainWidth - sidebarWidth - SPLIT_GAP,
+	);
+
+	return {
+		mainWidth,
+		sidebarWidth,
+		contentWidth,
+	};
+};
+
 type AppMode =
 	| 'chat'
 	| 'slashMenu'
 	| 'addForm'
-	| 'listModal'
-	| 'tablesModal'
-	| 'rowsModal';
+	| 'listModal';
 type AddFormField = 'name' | 'postgresUrl';
 
 type SlashCommand = {
@@ -50,7 +92,7 @@ type SlashCommand = {
 const slashCommands: SlashCommand[] = [
 	{ id: 'add', label: 'add', description: 'Add database' },
 	{ id: 'list', label: 'list', description: 'List databases' },
-	{ id: 'tables', label: 'tables', description: 'List tables and preview rows' },
+	{ id: 'tables', label: 'tables', description: 'Reload tables for active database' },
 ];
 
 const isNavigationKey = (key: {
@@ -227,11 +269,14 @@ export default function App() {
 	const [tables, setTables] = useState<TableReference[]>([]);
 	const [tablesIndex, setTablesIndex] = useState(0);
 	const [isLoadingTables, setIsLoadingTables] = useState(false);
+	const [tablesError, setTablesError] = useState<string | null>(null);
 	const [selectedTable, setSelectedTable] = useState<TableReference | null>(null);
 	const [rowsPreview, setRowsPreview] = useState<TableRowsPreview | null>(null);
-	const [rowsIndex, setRowsIndex] = useState(0);
+	const [rowsError, setRowsError] = useState<string | null>(null);
 	const [rowsColumnOffset, setRowsColumnOffset] = useState(0);
 	const [isLoadingRows, setIsLoadingRows] = useState(false);
+	const tablesLoadIdRef = useRef(0);
+	const rowsLoadIdRef = useRef(0);
 	const [terminalSize, setTerminalSize] = useState(() => getTerminalSize(stdout));
 
 	const rowsCount = rowsPreview?.rows.length ?? 0;
@@ -311,10 +356,6 @@ export default function App() {
 	}, [tables.length]);
 
 	useEffect(() => {
-		setRowsIndex(previous => wrapIndex(previous, rowsCount));
-	}, [rowsCount]);
-
-	useEffect(() => {
 		if (rowsColumnCount === 0) {
 			if (rowsColumnOffset !== 0) {
 				setRowsColumnOffset(0);
@@ -322,15 +363,24 @@ export default function App() {
 			return;
 		}
 
-		const viewport = getRowsViewport(
+		const splitPaneSizes = getSplitPaneSizes(
 			terminalSize.columns,
+			databaseState.activeDatabaseId !== null,
+		);
+		const viewport = getRowsViewport(
+			splitPaneSizes.contentWidth,
 			rowsColumnCount,
 			rowsColumnOffset,
 		);
 		if (viewport.offset !== rowsColumnOffset) {
 			setRowsColumnOffset(viewport.offset);
 		}
-	}, [rowsColumnCount, rowsColumnOffset, terminalSize.columns]);
+	}, [
+		databaseState.activeDatabaseId,
+		rowsColumnCount,
+		rowsColumnOffset,
+		terminalSize.columns,
+	]);
 
 	const activeDatabase = useMemo(
 		() =>
@@ -339,6 +389,58 @@ export default function App() {
 			) ?? null,
 		[databaseState],
 	);
+
+	const resetRowsState = useCallback(() => {
+		rowsLoadIdRef.current += 1;
+		setSelectedTable(null);
+		setRowsPreview(null);
+		setRowsError(null);
+		setRowsColumnOffset(0);
+		setIsLoadingRows(false);
+	}, []);
+
+	const loadTablesForDatabase = useCallback(
+		async (database: DatabaseEntry | null) => {
+			const loadId = tablesLoadIdRef.current + 1;
+			tablesLoadIdRef.current = loadId;
+
+			setTables([]);
+			setTablesIndex(0);
+			setTablesError(null);
+			resetRowsState();
+
+			if (!database) {
+				setIsLoadingTables(false);
+				return;
+			}
+
+			setIsLoadingTables(true);
+			try {
+				const nextTables = await listTables(database.postgresUrl);
+				if (tablesLoadIdRef.current !== loadId) {
+					return;
+				}
+
+				setTables(nextTables);
+				setTablesIndex(0);
+			} catch (error) {
+				if (tablesLoadIdRef.current !== loadId) {
+					return;
+				}
+
+				setTablesError(getErrorMessage(error));
+			} finally {
+				if (tablesLoadIdRef.current === loadId) {
+					setIsLoadingTables(false);
+				}
+			}
+		},
+		[resetRowsState],
+	);
+
+	useEffect(() => {
+		void loadTablesForDatabase(activeDatabase);
+	}, [activeDatabase, loadTablesForDatabase]);
 
 	const openListModal = () => {
 		const activeIndex = databaseState.databases.findIndex(
@@ -357,41 +459,8 @@ export default function App() {
 		setSlashIndex(0);
 	};
 
-	const openTablesModal = async () => {
-		if (isLoadingTables || isLoadingRows) {
-			return;
-		}
-
+	const loadRowsForSelectedTable = useCallback(async () => {
 		if (!activeDatabase) {
-			pushMessage('Nenhuma database ativa. Use /add ou /list para selecionar uma database.');
-			closeSlashMenu();
-			return;
-		}
-
-		setMode('tablesModal');
-		setDraft('');
-		setSlashQuery('');
-		setSlashIndex(0);
-		setRowsPreview(null);
-		setSelectedTable(null);
-		setRowsIndex(0);
-		setRowsColumnOffset(0);
-		setIsLoadingTables(true);
-
-		try {
-			const nextTables = await listTables(activeDatabase.postgresUrl);
-			setTables(nextTables);
-			setTablesIndex(0);
-		} catch (error) {
-			setMode('chat');
-			pushMessage(`Erro ao carregar tabelas: ${getErrorMessage(error)}`);
-		} finally {
-			setIsLoadingTables(false);
-		}
-	};
-
-	const openRowsModal = async () => {
-		if (isLoadingRows || isLoadingTables || !activeDatabase) {
 			return;
 		}
 
@@ -400,10 +469,12 @@ export default function App() {
 			return;
 		}
 
-		setMode('rowsModal');
+		const loadId = rowsLoadIdRef.current + 1;
+		rowsLoadIdRef.current = loadId;
+
 		setSelectedTable(table);
 		setRowsPreview(null);
-		setRowsIndex(0);
+		setRowsError(null);
 		setRowsColumnOffset(0);
 		setIsLoadingRows(true);
 
@@ -414,14 +485,23 @@ export default function App() {
 				table.name,
 				ROWS_PREVIEW_LIMIT,
 			);
+			if (rowsLoadIdRef.current !== loadId) {
+				return;
+			}
+
 			setRowsPreview(preview);
 		} catch (error) {
-			setMode('tablesModal');
-			pushMessage(`Erro ao carregar rows: ${getErrorMessage(error)}`);
+			if (rowsLoadIdRef.current !== loadId) {
+				return;
+			}
+
+			setRowsError(getErrorMessage(error));
 		} finally {
-			setIsLoadingRows(false);
+			if (rowsLoadIdRef.current === loadId) {
+				setIsLoadingRows(false);
+			}
 		}
-	};
+	}, [activeDatabase, tables, tablesIndex]);
 
 	const selectSlashCommand = () => {
 		const selectedCommand = filteredCommands[slashIndex];
@@ -447,7 +527,13 @@ export default function App() {
 			return;
 		}
 
-		void openTablesModal();
+		closeSlashMenu();
+		if (!activeDatabase) {
+			pushMessage('Nenhuma database ativa. Use /add ou /list para selecionar uma database.');
+			return;
+		}
+
+		void loadTablesForDatabase(activeDatabase);
 	};
 
 	const submitAddForm = async () => {
@@ -519,13 +605,8 @@ export default function App() {
 				return;
 			}
 
-			if (mode === 'listModal' || mode === 'tablesModal') {
+			if (mode === 'listModal') {
 				setMode('chat');
-				return;
-			}
-
-			if (mode === 'rowsModal') {
-				setMode('tablesModal');
 				return;
 			}
 		}
@@ -628,59 +709,31 @@ export default function App() {
 			return;
 		}
 
-		if (mode === 'tablesModal') {
-			if (isLoadingTables || tables.length === 0) {
-				return;
-			}
-
-			if (key.upArrow) {
+		if (key.upArrow) {
+			if (!isLoadingTables && tables.length > 0) {
 				setTablesIndex(previous => wrapIndex(previous - 1, tables.length));
-				return;
 			}
-
-			if (key.downArrow || key.tab) {
-				setTablesIndex(previous => wrapIndex(previous + 1, tables.length));
-				return;
-			}
-
-			if (key.return) {
-				void openRowsModal();
-			}
-
 			return;
 		}
 
-		if (mode === 'rowsModal') {
-			if (isLoadingRows || !rowsPreview) {
-				return;
+		if (key.downArrow || key.tab) {
+			if (!isLoadingTables && tables.length > 0) {
+				setTablesIndex(previous => wrapIndex(previous + 1, tables.length));
 			}
+			return;
+		}
 
-			if (key.upArrow) {
-				setRowsIndex(previous => wrapIndex(previous - 1, rowsPreview.rows.length));
-				return;
-			}
-
-			if (key.downArrow) {
-				setRowsIndex(previous => wrapIndex(previous + 1, rowsPreview.rows.length));
-				return;
-			}
-
-			if (key.leftArrow) {
+		if (key.leftArrow) {
+			if (rowsPreview) {
 				setRowsColumnOffset(previous => Math.max(0, previous - 1));
-				return;
 			}
+			return;
+		}
 
-			if (key.rightArrow) {
-				setRowsColumnOffset(previous => {
-					const viewport = getRowsViewport(
-						terminalSize.columns,
-						rowsPreview.columns.length,
-						previous,
-					);
-					return Math.min(viewport.maxOffset, previous + 1);
-				});
+		if (key.rightArrow) {
+			if (rowsPreview) {
+				setRowsColumnOffset(previous => Math.min(rowsViewport.maxOffset, previous + 1));
 			}
-
 			return;
 		}
 
@@ -695,9 +748,13 @@ export default function App() {
 			const message = draft.trim();
 			if (message.length > 0) {
 				setMessages(previous => [...previous, message]);
+				setDraft('');
+				return;
 			}
 
-			setDraft('');
+			if (!isLoadingRows && !isLoadingTables && activeDatabase && tables.length > 0) {
+				void loadRowsForSelectedTable();
+			}
 			return;
 		}
 
@@ -708,11 +765,6 @@ export default function App() {
 
 		if (
 			key.escape ||
-			key.tab ||
-			key.upArrow ||
-			key.downArrow ||
-			key.leftArrow ||
-			key.rightArrow ||
 			key.pageUp ||
 			key.pageDown
 		) {
@@ -733,6 +785,11 @@ export default function App() {
 		terminalSize.rows - INPUT_BAR_HEIGHT - STATUS_BAR_HEIGHT - modalRows - 2,
 	);
 	const visibleMessages = messages.slice(-mainViewportRows);
+	const hasActiveDatabase = activeDatabase !== null;
+	const splitPaneSizes = useMemo(
+		() => getSplitPaneSizes(terminalSize.columns, hasActiveDatabase),
+		[hasActiveDatabase, terminalSize.columns],
+	);
 	const inputLabel =
 		mode === 'chat'
 			? `› ${draft}`
@@ -740,13 +797,7 @@ export default function App() {
 				? `› /${slashQuery}`
 				: mode === 'addForm'
 					? '› preenchendo formulário de database'
-					: mode === 'listModal'
-						? '› selecionando database ativa'
-						: mode === 'tablesModal'
-							? '› selecionando tabela'
-							: selectedTable
-								? `› visualizando rows: ${selectedTable.qualifiedName}`
-								: '› visualizando rows';
+					: '› selecionando database ativa';
 
 	const dbIndicator = isLoadingDatabases
 		? 'loading...'
@@ -756,7 +807,8 @@ export default function App() {
 
 	const listEntries = databaseState.databases;
 	const listMaxUrlLength = Math.max(12, terminalSize.columns - 18);
-	const tableNameMaxLength = Math.max(10, terminalSize.columns - 12);
+	const tableNameMaxLength = Math.max(10, splitPaneSizes.sidebarWidth - 4);
+	const selectedSidebarTable = tables[tablesIndex] ?? null;
 
 	const rowsViewport = useMemo(() => {
 		if (!rowsPreview) {
@@ -770,7 +822,7 @@ export default function App() {
 		}
 
 		const viewport = getRowsViewport(
-			terminalSize.columns,
+			splitPaneSizes.contentWidth,
 			rowsPreview.columns.length,
 			rowsColumnOffset,
 		);
@@ -781,7 +833,7 @@ export default function App() {
 				viewport.offset + viewport.visibleColumnCount,
 			),
 		};
-	}, [rowsPreview, rowsColumnOffset, terminalSize.columns]);
+	}, [rowsPreview, rowsColumnOffset, splitPaneSizes.contentWidth]);
 
 	const rowsHeaderLine = useMemo(() => {
 		if (rowsViewport.visibleColumns.length === 0) {
@@ -794,17 +846,13 @@ export default function App() {
 		return `${padCell('row', ROW_NUMBER_WIDTH)}${CELL_SEPARATOR}${headerColumns}`;
 	}, [rowsViewport]);
 
-	const rowsWindowSize = Math.max(1, mainViewportRows - 5);
-	const maxRowsWindowStart = Math.max(0, rowsCount - rowsWindowSize);
-	const rowsWindowStart = Math.min(
-		maxRowsWindowStart,
-		Math.max(0, rowsIndex - Math.floor(rowsWindowSize / 2)),
-	);
+	const rowsWindowSize = Math.max(1, mainViewportRows - 6);
+	const rowsWindowStart = 0;
 	const visibleRows = rowsPreview
 		? rowsPreview.rows.slice(rowsWindowStart, rowsWindowStart + rowsWindowSize)
 		: [];
 
-	const tablesWindowSize = Math.max(1, mainViewportRows - 2);
+	const tablesWindowSize = Math.max(1, mainViewportRows - 4);
 	const maxTablesWindowStart = Math.max(0, tables.length - tablesWindowSize);
 	const tablesWindowStart = Math.min(
 		maxTablesWindowStart,
@@ -829,86 +877,99 @@ export default function App() {
 				overflow="hidden"
 				backgroundColor={MAIN_BACKGROUND}
 			>
-				{mode === 'tablesModal' ? (
-					<>
-						<Box justifyContent="space-between">
+				{hasActiveDatabase ? (
+					<Box flexDirection="row" flexGrow={1} overflow="hidden">
+						<Box
+							flexDirection="column"
+							width={splitPaneSizes.sidebarWidth}
+							overflow="hidden"
+						>
 							<Text bold color={PRIMARY_TEXT}>
-								Tables
+								{`Tables • ${truncateText(activeDatabase?.name ?? '', Math.max(10, splitPaneSizes.sidebarWidth - 12))}`}
 							</Text>
-							<Text color={SECONDARY_TEXT}>esc</Text>
+							{isLoadingTables ? (
+								<Text color={SECONDARY_TEXT}>Carregando tabelas...</Text>
+							) : tablesError ? (
+								<Text color="red">{`Erro ao carregar tabelas: ${tablesError}`}</Text>
+							) : tables.length === 0 ? (
+								<Text color={SECONDARY_TEXT}>Nenhuma tabela encontrada.</Text>
+							) : (
+								visibleTables.map((table, index) => {
+									const absoluteIndex = tablesWindowStart + index;
+									const isSelected = absoluteIndex === tablesIndex;
+									return (
+										<Text key={table.qualifiedName} color={isSelected ? 'magenta' : PRIMARY_TEXT}>
+											{`${isSelected ? '›' : ' '} ${truncateText(table.qualifiedName, tableNameMaxLength)}`}
+										</Text>
+									);
+								})
+							)}
+							<Text color={SECONDARY_TEXT}>
+								{tables.length > 0
+									? `${tablesIndex + 1}/${tables.length} • enter carrega rows`
+									: 'use /tables para recarregar'}
+							</Text>
 						</Box>
-						{isLoadingTables ? (
-							<Text color={SECONDARY_TEXT}>Carregando tabelas...</Text>
-						) : tables.length === 0 ? (
-							<Text color={SECONDARY_TEXT}>Nenhuma tabela encontrada.</Text>
-						) : (
-							visibleTables.map((table, index) => {
-								const absoluteIndex = tablesWindowStart + index;
-								const isSelected = absoluteIndex === tablesIndex;
-								return (
-									<Text key={table.qualifiedName} color={isSelected ? 'magenta' : PRIMARY_TEXT}>
-										{`${isSelected ? '›' : ' '} ${truncateText(table.qualifiedName, tableNameMaxLength)}`}
-									</Text>
-								);
-							})
-						)}
-						<Text color={SECONDARY_TEXT}>
-							{tables.length > 0
-								? `${tablesIndex + 1}/${tables.length} • enter abre rows`
-								: 'esc fecha'}
-						</Text>
-					</>
-				) : mode === 'rowsModal' ? (
-					<>
-						<Box justifyContent="space-between">
+
+						<Box width={SPLIT_GAP} />
+
+						<Box
+							flexDirection="column"
+							flexGrow={1}
+							width={splitPaneSizes.contentWidth}
+							overflow="hidden"
+						>
 							<Text bold color={PRIMARY_TEXT}>
 								{selectedTable
-									? `Rows • ${truncateText(selectedTable.qualifiedName, Math.max(10, terminalSize.columns - 24))}`
-									: 'Rows'}
+									? `Rows • ${truncateText(selectedTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
+									: selectedSidebarTable
+										? `Rows • ${truncateText(selectedSidebarTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
+										: 'Rows'}
 							</Text>
-							<Text color={SECONDARY_TEXT}>esc</Text>
-						</Box>
-						{isLoadingRows ? (
-							<Text color={SECONDARY_TEXT}>Carregando rows...</Text>
-						) : !rowsPreview ? (
-							<Text color={SECONDARY_TEXT}>Nenhuma row carregada.</Text>
-						) : rowsViewport.visibleColumns.length === 0 ? (
-							<Text color={SECONDARY_TEXT}>Não há colunas para exibir.</Text>
-						) : (
-							<>
-								<Text color="cyan">{rowsHeaderLine}</Text>
-								{rowsPreview.rows.length === 0 ? (
-									<Text color={SECONDARY_TEXT}>Sem rows para exibir.</Text>
-								) : (
-									visibleRows.map((row, index) => {
-										const absoluteIndex = rowsWindowStart + index;
-										const isSelected = absoluteIndex === rowsIndex;
-										const rowLabel = padCell(String(absoluteIndex + 1), ROW_NUMBER_WIDTH);
-										const rowCells = rowsViewport.visibleColumns
-											.map(column => padCell(formatCellValue(row[column]), rowsViewport.cellWidth))
-											.join(CELL_SEPARATOR);
-										const rowLine = `${rowLabel}${CELL_SEPARATOR}${rowCells}`;
+							{isLoadingRows ? (
+								<Text color={SECONDARY_TEXT}>Carregando rows...</Text>
+							) : rowsError ? (
+								<Text color="red">{`Erro ao carregar rows: ${rowsError}`}</Text>
+							) : !selectedTable || !rowsPreview ? (
+								<Text color={SECONDARY_TEXT}>
+									Selecione uma table na sidebar e pressione Enter.
+								</Text>
+							) : rowsViewport.visibleColumns.length === 0 ? (
+								<Text color={SECONDARY_TEXT}>Não há colunas para exibir.</Text>
+							) : (
+								<>
+									<Text color="cyan">{rowsHeaderLine}</Text>
+									{rowsPreview.rows.length === 0 ? (
+										<Text color={SECONDARY_TEXT}>Sem rows para exibir.</Text>
+									) : (
+										visibleRows.map((row, index) => {
+											const absoluteIndex = rowsWindowStart + index;
+											const rowLabel = padCell(String(absoluteIndex + 1), ROW_NUMBER_WIDTH);
+											const rowCells = rowsViewport.visibleColumns
+												.map(column => padCell(formatCellValue(row[column]), rowsViewport.cellWidth))
+												.join(CELL_SEPARATOR);
+											const rowLine = `${rowLabel}${CELL_SEPARATOR}${rowCells}`;
 
-										return (
-											<Text
-												key={`${absoluteIndex}-${rowLine}`}
-												color={isSelected ? 'yellow' : PRIMARY_TEXT}
-											>
-												{rowLine}
-											</Text>
-										);
-									})
-								)}
-								<Text color={SECONDARY_TEXT}>
-									{`mostrando ${visibleRows.length}/${rowsPreview.rows.length} rows (limit ${rowsPreview.limit})`}
-								</Text>
-								<Text color={SECONDARY_TEXT}>
-									{`colunas ${rowsViewport.offset + 1}-${rowsViewport.offset + rowsViewport.visibleColumns.length}/${rowsPreview.columns.length}`}
-								</Text>
-							</>
-						)}
-						<Text color={SECONDARY_TEXT}>↑/↓ rows • ←/→ colunas • esc volta</Text>
-					</>
+											return (
+												<Text key={`${absoluteIndex}-${rowLine}`} color={PRIMARY_TEXT}>
+													{rowLine}
+												</Text>
+											);
+										})
+									)}
+									<Text color={SECONDARY_TEXT}>
+										{`mostrando ${visibleRows.length}/${rowsCount} rows (limit ${rowsPreview.limit})`}
+									</Text>
+									<Text color={SECONDARY_TEXT}>
+										{`colunas ${rowsViewport.offset + 1}-${rowsViewport.offset + rowsViewport.visibleColumns.length}/${rowsPreview.columns.length}`}
+									</Text>
+								</>
+							)}
+							<Text color={SECONDARY_TEXT}>
+								↑/↓ tables • enter carrega rows • ←/→ colunas
+							</Text>
+						</Box>
+					</Box>
 				) : (
 					<>
 						{visibleMessages.length === 0 ? (
