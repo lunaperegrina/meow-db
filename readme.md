@@ -8,6 +8,14 @@
 $ npm install --global my-ink-cli
 ```
 
+## Development
+
+```bash
+$ npm run dev
+```
+
+`npm run dev` executa o CLI com hot reload local: ao salvar arquivos em `src/`, o processo reinicia automaticamente.
+
 ## CLI
 
 ```
