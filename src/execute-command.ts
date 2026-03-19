@@ -7,12 +7,12 @@ import {
 	loadOrCreateConfig,
 	readConfig,
 	writeConfig,
-} from './config-store.js';
-import { CliError } from './errors.js';
+} from './config-store';
+import { CliError } from './errors';
 import {
 	getRows as getRowsFromPostgres,
 	listTables as listTablesFromPostgres,
-} from './postgres.js';
+} from './postgres';
 
 type Flags = {
 	json: boolean;

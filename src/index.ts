@@ -11,7 +11,7 @@ import {
 	formatHumanErrorLines,
 	formatHumanSuccessLines,
 	formatSuccessJsonPayload,
-} from './output.js';
+} from './output';
 
 const cli = meow(
 	`
