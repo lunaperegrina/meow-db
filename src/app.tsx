@@ -118,6 +118,9 @@ const isNavigationKey = (key: {
 
 const normalizeInput = (value: string) => value.replaceAll(/\r?\n/g, '');
 const ESCAPE_INPUT = '\u001B';
+const ENABLE_MOUSE_TRACKING = '\u001B[?1000h\u001B[?1006h';
+const DISABLE_MOUSE_TRACKING = '\u001B[?1000l\u001B[?1006l';
+const SGR_MOUSE_EVENT_PATTERN = /^\[<(\d+);(\d+);(\d+)([Mm])$/;
 
 const wrapIndex = (index: number, total: number): number => {
 	if (total <= 0) {
@@ -133,6 +136,61 @@ const wrapIndex = (index: number, total: number): number => {
 	}
 
 	return index;
+};
+
+const clamp = (value: number, min: number, max: number): number =>
+	Math.min(max, Math.max(min, value));
+
+type MouseEventType = 'leftClick' | 'wheelUp' | 'wheelDown';
+
+type ParsedMouseEvent = {
+	type: MouseEventType;
+	x: number;
+	y: number;
+};
+
+const parseSgrMouseEvent = (input: string): ParsedMouseEvent | null => {
+	const match = SGR_MOUSE_EVENT_PATTERN.exec(input);
+	if (!match) {
+		return null;
+	}
+
+	const buttonCode = Number.parseInt(match[1], 10);
+	const x = Number.parseInt(match[2], 10);
+	const y = Number.parseInt(match[3], 10);
+	const marker = match[4];
+
+	if (
+		Number.isNaN(buttonCode) ||
+		Number.isNaN(x) ||
+		Number.isNaN(y) ||
+		x <= 0 ||
+		y <= 0
+	) {
+		return null;
+	}
+
+	if ((buttonCode & 64) === 64) {
+		return {
+			type: (buttonCode & 1) === 1 ? 'wheelDown' : 'wheelUp',
+			x: x - 1,
+			y: y - 1,
+		};
+	}
+
+	const isButtonPress = marker === 'M';
+	const isMotion = (buttonCode & 32) === 32;
+	const isLeftButton = (buttonCode & 3) === 0;
+
+	if (isButtonPress && !isMotion && isLeftButton) {
+		return {
+			type: 'leftClick',
+			x: x - 1,
+			y: y - 1,
+		};
+	}
+
+	return null;
 };
 
 const truncateText = (value: string, maxLength: number): string => {
@@ -274,6 +332,7 @@ export default function App() {
 	const [rowsPreview, setRowsPreview] = useState<TableRowsPreview | null>(null);
 	const [rowsError, setRowsError] = useState<string | null>(null);
 	const [rowsColumnOffset, setRowsColumnOffset] = useState(0);
+	const [rowsWindowStart, setRowsWindowStart] = useState(0);
 	const [isLoadingRows, setIsLoadingRows] = useState(false);
 	const tablesLoadIdRef = useRef(0);
 	const rowsLoadIdRef = useRef(0);
@@ -290,6 +349,17 @@ export default function App() {
 		stdout.on('resize', handleResize);
 		return () => {
 			stdout.off('resize', handleResize);
+		};
+	}, [stdout]);
+
+	useEffect(() => {
+		if (!stdout.isTTY) {
+			return;
+		}
+
+		stdout.write(ENABLE_MOUSE_TRACKING);
+		return () => {
+			stdout.write(DISABLE_MOUSE_TRACKING);
 		};
 	}, [stdout]);
 
@@ -396,6 +466,7 @@ export default function App() {
 		setRowsPreview(null);
 		setRowsError(null);
 		setRowsColumnOffset(0);
+		setRowsWindowStart(0);
 		setIsLoadingRows(false);
 	}, []);
 
@@ -459,13 +530,8 @@ export default function App() {
 		setSlashIndex(0);
 	};
 
-	const loadRowsForSelectedTable = useCallback(async () => {
+	const loadRowsForTable = useCallback(async (table: TableReference) => {
 		if (!activeDatabase) {
-			return;
-		}
-
-		const table = tables[tablesIndex];
-		if (!table) {
 			return;
 		}
 
@@ -476,6 +542,7 @@ export default function App() {
 		setRowsPreview(null);
 		setRowsError(null);
 		setRowsColumnOffset(0);
+		setRowsWindowStart(0);
 		setIsLoadingRows(true);
 
 		try {
@@ -501,7 +568,16 @@ export default function App() {
 				setIsLoadingRows(false);
 			}
 		}
-	}, [activeDatabase, tables, tablesIndex]);
+	}, [activeDatabase]);
+
+	const loadRowsForSelectedTable = useCallback(async () => {
+		const table = tables[tablesIndex];
+		if (!table) {
+			return;
+		}
+
+		await loadRowsForTable(table);
+	}, [loadRowsForTable, tables, tablesIndex]);
 
 	const selectSlashCommand = () => {
 		const selectedCommand = filteredCommands[slashIndex];
@@ -609,6 +685,78 @@ export default function App() {
 				setMode('chat');
 				return;
 			}
+		}
+
+		const mouseEvent = parseSgrMouseEvent(input);
+		if (mouseEvent) {
+			if (mode !== 'chat' || !hasActiveDatabase) {
+				return;
+			}
+
+			const splitPaneX = 1;
+			const splitPaneY = 1;
+			const sidebarXStart = splitPaneX;
+			const sidebarXEnd = sidebarXStart + splitPaneSizes.sidebarWidth;
+			const tablesListYStart = splitPaneY + 1;
+			const tablesListYEnd = tablesListYStart + visibleTables.length;
+			const contentXStart = sidebarXEnd + SPLIT_GAP;
+			const contentXEnd = contentXStart + splitPaneSizes.contentWidth;
+			const contentYStart = splitPaneY + 1;
+			const contentYEnd = contentYStart + Math.max(0, mainViewportRows - 1);
+
+			const isWithinSidebar =
+				mouseEvent.x >= sidebarXStart &&
+				mouseEvent.x < sidebarXEnd &&
+				mouseEvent.y >= splitPaneY &&
+				mouseEvent.y < splitPaneY + mainViewportRows;
+
+			if (isWithinSidebar) {
+				if (
+					(mouseEvent.type === 'wheelUp' || mouseEvent.type === 'wheelDown') &&
+					!isLoadingTables &&
+					tables.length > 0
+				) {
+					const delta = mouseEvent.type === 'wheelDown' ? 1 : -1;
+					setTablesIndex(previous => clamp(previous + delta, 0, tables.length - 1));
+				}
+
+				if (
+					mouseEvent.type === 'leftClick' &&
+					!isLoadingTables &&
+					mouseEvent.y >= tablesListYStart &&
+					mouseEvent.y < tablesListYEnd
+				) {
+					const relativeIndex = mouseEvent.y - tablesListYStart;
+					const absoluteIndex = tablesWindowStart + relativeIndex;
+					const table = tables[absoluteIndex];
+					if (table) {
+						setTablesIndex(absoluteIndex);
+						void loadRowsForTable(table);
+					}
+				}
+
+				return;
+			}
+
+			const isWithinContent =
+				mouseEvent.x >= contentXStart &&
+				mouseEvent.x < contentXEnd &&
+				mouseEvent.y >= contentYStart &&
+				mouseEvent.y < contentYEnd;
+
+			if (
+				isWithinContent &&
+				(mouseEvent.type === 'wheelUp' || mouseEvent.type === 'wheelDown') &&
+				rowsPreview &&
+				!isLoadingRows
+			) {
+				const delta = mouseEvent.type === 'wheelDown' ? 1 : -1;
+				setRowsWindowStart(previous =>
+					clamp(previous + delta, 0, maxRowsWindowStart),
+				);
+			}
+
+			return;
 		}
 
 		if (key.ctrl || key.meta) {
@@ -847,10 +995,17 @@ export default function App() {
 	}, [rowsViewport]);
 
 	const rowsWindowSize = Math.max(1, mainViewportRows - 6);
-	const rowsWindowStart = 0;
+	const maxRowsWindowStart = Math.max(0, rowsCount - rowsWindowSize);
+
+	useEffect(() => {
+		setRowsWindowStart(previous => clamp(previous, 0, maxRowsWindowStart));
+	}, [maxRowsWindowStart]);
+
 	const visibleRows = rowsPreview
 		? rowsPreview.rows.slice(rowsWindowStart, rowsWindowStart + rowsWindowSize)
 		: [];
+	const visibleRowsStart = visibleRows.length > 0 ? rowsWindowStart + 1 : 0;
+	const visibleRowsEnd = rowsWindowStart + visibleRows.length;
 
 	const tablesWindowSize = Math.max(1, mainViewportRows - 4);
 	const maxTablesWindowStart = Math.max(0, tables.length - tablesWindowSize);
@@ -884,92 +1039,92 @@ export default function App() {
 							width={splitPaneSizes.sidebarWidth}
 							overflow="hidden"
 						>
-							<Text bold color={PRIMARY_TEXT}>
-								{`Tables • ${truncateText(activeDatabase?.name ?? '', Math.max(10, splitPaneSizes.sidebarWidth - 12))}`}
-							</Text>
-							{isLoadingTables ? (
-								<Text color={SECONDARY_TEXT}>Carregando tabelas...</Text>
-							) : tablesError ? (
-								<Text color="red">{`Erro ao carregar tabelas: ${tablesError}`}</Text>
-							) : tables.length === 0 ? (
-								<Text color={SECONDARY_TEXT}>Nenhuma tabela encontrada.</Text>
-							) : (
-								visibleTables.map((table, index) => {
-									const absoluteIndex = tablesWindowStart + index;
-									const isSelected = absoluteIndex === tablesIndex;
-									return (
-										<Text key={table.qualifiedName} color={isSelected ? 'magenta' : PRIMARY_TEXT}>
-											{`${isSelected ? '›' : ' '} ${truncateText(table.qualifiedName, tableNameMaxLength)}`}
-										</Text>
-									);
-								})
-							)}
-							<Text color={SECONDARY_TEXT}>
-								{tables.length > 0
-									? `${tablesIndex + 1}/${tables.length} • enter carrega rows`
-									: 'use /tables para recarregar'}
-							</Text>
-						</Box>
+								<Text bold color={PRIMARY_TEXT}>
+									{`Tables • ${truncateText(activeDatabase?.name ?? '', Math.max(10, splitPaneSizes.sidebarWidth - 12))}`}
+								</Text>
+								{isLoadingTables ? (
+									<Text color={SECONDARY_TEXT}>Carregando tabelas...</Text>
+								) : tablesError ? (
+									<Text color="red">{`Erro ao carregar tabelas: ${tablesError}`}</Text>
+								) : tables.length === 0 ? (
+									<Text color={SECONDARY_TEXT}>Nenhuma tabela encontrada.</Text>
+								) : (
+									visibleTables.map((table, index) => {
+										const absoluteIndex = tablesWindowStart + index;
+										const isSelected = absoluteIndex === tablesIndex;
+										return (
+											<Text key={table.qualifiedName} color={isSelected ? 'magenta' : PRIMARY_TEXT}>
+												{`${isSelected ? '›' : ' '} ${truncateText(table.qualifiedName, tableNameMaxLength)}`}
+											</Text>
+										);
+									})
+								)}
+								<Text color={SECONDARY_TEXT}>
+									{tables.length > 0
+										? `${tablesIndex + 1}/${tables.length} • enter/click carrega rows`
+										: 'use /tables para recarregar'}
+								</Text>
+							</Box>
 
 						<Box width={SPLIT_GAP} />
 
-						<Box
-							flexDirection="column"
-							flexGrow={1}
-							width={splitPaneSizes.contentWidth}
-							overflow="hidden"
-						>
-							<Text bold color={PRIMARY_TEXT}>
-								{selectedTable
-									? `Rows • ${truncateText(selectedTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
-									: selectedSidebarTable
-										? `Rows • ${truncateText(selectedSidebarTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
-										: 'Rows'}
-							</Text>
-							{isLoadingRows ? (
-								<Text color={SECONDARY_TEXT}>Carregando rows...</Text>
-							) : rowsError ? (
-								<Text color="red">{`Erro ao carregar rows: ${rowsError}`}</Text>
-							) : !selectedTable || !rowsPreview ? (
-								<Text color={SECONDARY_TEXT}>
-									Selecione uma table na sidebar e pressione Enter.
+							<Box
+								flexDirection="column"
+								flexGrow={1}
+								width={splitPaneSizes.contentWidth}
+								overflow="hidden"
+							>
+								<Text bold color={PRIMARY_TEXT}>
+									{selectedTable
+										? `Rows • ${truncateText(selectedTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
+										: selectedSidebarTable
+											? `Rows • ${truncateText(selectedSidebarTable.qualifiedName, Math.max(10, splitPaneSizes.contentWidth - 12))}`
+											: 'Rows'}
 								</Text>
-							) : rowsViewport.visibleColumns.length === 0 ? (
-								<Text color={SECONDARY_TEXT}>Não há colunas para exibir.</Text>
-							) : (
-								<>
-									<Text color="cyan">{rowsHeaderLine}</Text>
-									{rowsPreview.rows.length === 0 ? (
-										<Text color={SECONDARY_TEXT}>Sem rows para exibir.</Text>
-									) : (
-										visibleRows.map((row, index) => {
-											const absoluteIndex = rowsWindowStart + index;
-											const rowLabel = padCell(String(absoluteIndex + 1), ROW_NUMBER_WIDTH);
-											const rowCells = rowsViewport.visibleColumns
-												.map(column => padCell(formatCellValue(row[column]), rowsViewport.cellWidth))
-												.join(CELL_SEPARATOR);
-											const rowLine = `${rowLabel}${CELL_SEPARATOR}${rowCells}`;
+								{isLoadingRows ? (
+									<Text color={SECONDARY_TEXT}>Carregando rows...</Text>
+								) : rowsError ? (
+									<Text color="red">{`Erro ao carregar rows: ${rowsError}`}</Text>
+								) : !selectedTable || !rowsPreview ? (
+									<Text color={SECONDARY_TEXT}>
+										Clique ou selecione uma table na sidebar para carregar rows.
+									</Text>
+								) : rowsViewport.visibleColumns.length === 0 ? (
+									<Text color={SECONDARY_TEXT}>Não há colunas para exibir.</Text>
+								) : (
+									<>
+										<Text color="cyan">{rowsHeaderLine}</Text>
+										{rowsPreview.rows.length === 0 ? (
+											<Text color={SECONDARY_TEXT}>Sem rows para exibir.</Text>
+										) : (
+											visibleRows.map((row, index) => {
+												const absoluteIndex = rowsWindowStart + index;
+												const rowLabel = padCell(String(absoluteIndex + 1), ROW_NUMBER_WIDTH);
+												const rowCells = rowsViewport.visibleColumns
+													.map(column => padCell(formatCellValue(row[column]), rowsViewport.cellWidth))
+													.join(CELL_SEPARATOR);
+												const rowLine = `${rowLabel}${CELL_SEPARATOR}${rowCells}`;
 
-											return (
-												<Text key={`${absoluteIndex}-${rowLine}`} color={PRIMARY_TEXT}>
-													{rowLine}
-												</Text>
-											);
-										})
-									)}
-									<Text color={SECONDARY_TEXT}>
-										{`mostrando ${visibleRows.length}/${rowsCount} rows (limit ${rowsPreview.limit})`}
-									</Text>
-									<Text color={SECONDARY_TEXT}>
-										{`colunas ${rowsViewport.offset + 1}-${rowsViewport.offset + rowsViewport.visibleColumns.length}/${rowsPreview.columns.length}`}
-									</Text>
-								</>
-							)}
-							<Text color={SECONDARY_TEXT}>
-								↑/↓ tables • enter carrega rows • ←/→ colunas
-							</Text>
+												return (
+													<Text key={`${absoluteIndex}-${rowLine}`} color={PRIMARY_TEXT}>
+														{rowLine}
+													</Text>
+												);
+											})
+										)}
+										<Text color={SECONDARY_TEXT}>
+											{`rows ${visibleRowsStart}-${visibleRowsEnd}/${rowsCount} (limit ${rowsPreview.limit})`}
+										</Text>
+										<Text color={SECONDARY_TEXT}>
+											{`colunas ${rowsViewport.offset + 1}-${rowsViewport.offset + rowsViewport.visibleColumns.length}/${rowsPreview.columns.length}`}
+										</Text>
+									</>
+								)}
+								<Text color={SECONDARY_TEXT}>
+									↑/↓ tables • click carrega rows • wheel sidebar/rows • ←/→ colunas
+								</Text>
+							</Box>
 						</Box>
-					</Box>
 				) : (
 					<>
 						{visibleMessages.length === 0 ? (
