@@ -1,6 +1,6 @@
 {
 	"name": "@lunaperegrina/meowdb",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"license": "MIT",
 	"bin": {
 		"meowdb": "dist/bundle.js"
