@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"license": "MIT",
 	"bin": {
-		"meow": "dist/cli.js"
+		"meow": "dist/index.js"
 	},
 	"type": "module",
 	"engines": {

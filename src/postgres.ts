@@ -1,5 +1,5 @@
 import {Client} from 'pg';
-import {CliError} from './errors.js';
+import {CliError} from './errors';
 
 export async function listTables(
 	url: string,

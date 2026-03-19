@@ -190,7 +190,7 @@ test('cli smoke with --json works through entrypoint', async t => {
 		process.execPath,
 		[
 			'--loader=ts-node/esm',
-			'./source/cli.tsx',
+			'./source/index.ts',
 			'db',
 			'add',
 			'local',
@@ -208,7 +208,7 @@ test('cli smoke with --json works through entrypoint', async t => {
 
 	const listResult = spawnSync(
 		process.execPath,
-		['--loader=ts-node/esm', './source/cli.tsx', 'db', 'list', '--json'],
+		['--loader=ts-node/esm', './source/index.ts', 'db', 'list', '--json'],
 		{
 			cwd: process.cwd(),
 			env: environment,

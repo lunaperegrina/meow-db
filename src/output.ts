@@ -1,5 +1,5 @@
-import {type CliError} from './errors.js';
-import {type CommandSuccess} from './execute-command.js';
+import { type CliError } from './errors';
+import { type CommandSuccess } from './execute-command';
 
 export function formatSuccessJsonPayload(result: CommandSuccess): string {
 	return JSON.stringify({

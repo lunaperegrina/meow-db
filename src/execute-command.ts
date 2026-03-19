@@ -8,7 +8,7 @@ import {
 	readConfig,
 	writeConfig,
 } from './config-store.js';
-import {CliError} from './errors.js';
+import { CliError } from './errors.js';
 import {
 	getRows as getRowsFromPostgres,
 	listTables as listTablesFromPostgres,
@@ -66,7 +66,7 @@ export async function executeCommand(
 	overrides: Partial<Dependencies> = {},
 	environment: NodeJS.ProcessEnv = process.env,
 ): Promise<CommandSuccess> {
-	const dependencies = {...defaultDependencies, ...overrides};
+	const dependencies = { ...defaultDependencies, ...overrides };
 	const [command, ...rest] = input;
 	const configPath = dependencies.getPath(environment);
 
@@ -218,7 +218,7 @@ async function handleDbList(
 	if (connections.length === 0) {
 		return {
 			command: 'db list',
-			data: {activeDb: null, connections: []},
+			data: { activeDb: null, connections: [] },
 			human: {
 				lines: ['No databases configured.'],
 				quietLines: [],
@@ -264,7 +264,7 @@ async function handleDbUse(
 
 	return {
 		command: 'db use',
-		data: {activeDb: name},
+		data: { activeDb: name },
 		human: {
 			lines: [`Using db "${name}".`],
 			quietLines: [name],
@@ -314,7 +314,7 @@ async function handleDbRemove(
 		});
 	}
 
-	const {[name]: omittedConnection, ...remainingConnections} =
+	const { [name]: omittedConnection, ...remainingConnections } =
 		config.connections;
 	void omittedConnection;
 	config.connections = remainingConnections;
@@ -326,7 +326,7 @@ async function handleDbRemove(
 
 	return {
 		command: 'db remove',
-		data: {name},
+		data: { name },
 		human: {
 			lines: [`Removed db "${name}".`],
 			quietLines: [name],
@@ -349,7 +349,7 @@ async function handleTables(
 	if (tables.length === 0) {
 		return {
 			command: 'tables',
-			data: {schema, tables: []},
+			data: { schema, tables: [] },
 			human: {
 				lines: [`No tables found in schema "${schema}".`],
 				quietLines: [],
@@ -359,7 +359,7 @@ async function handleTables(
 
 	return {
 		command: 'tables',
-		data: {schema, tables},
+		data: { schema, tables },
 		human: {
 			lines: tables.map(table => `- ${table}`),
 			quietLines: tables,

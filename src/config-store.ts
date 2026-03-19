@@ -2,7 +2,7 @@ import process from 'node:process';
 import os from 'node:os';
 import path from 'node:path';
 import {promises as fs} from 'node:fs';
-import {CliError} from './errors.js';
+import {CliError} from './errors';
 
 export type ConnectionConfig = {
 	url: string;

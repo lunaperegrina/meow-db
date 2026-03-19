@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import process from 'node:process';
 import React from 'react';
-import {render} from 'ink';
+import { render } from 'ink';
 import meow from 'meow';
-import App from './app.js';
-import {toCliError} from './errors.js';
-import {executeCommand} from './execute-command.js';
+import App from './app';
+import { toCliError } from './errors';
+import { executeCommand } from './execute-command';
 import {
 	formatErrorJsonPayload,
 	formatHumanErrorLines,
@@ -70,7 +70,11 @@ try {
 	if (cli.flags.json) {
 		process.stdout.write(`${formatSuccessJsonPayload(result)}\n`);
 	} else {
-		render(<App lines={formatHumanSuccessLines(result, cli.flags.quiet)} />);
+		render(
+			React.createElement(App, {
+				lines: formatHumanSuccessLines(result, cli.flags.quiet),
+			}),
+		);
 	}
 } catch (error: unknown) {
 	const cliError = toCliError(error);
@@ -79,6 +83,10 @@ try {
 	if (cli.flags.json) {
 		process.stdout.write(`${formatErrorJsonPayload(cliError)}\n`);
 	} else {
-		render(<App lines={formatHumanErrorLines(cliError, cli.flags.quiet)} />);
+		render(
+			React.createElement(App, {
+				lines: formatHumanErrorLines(cliError, cli.flags.quiet),
+			}),
+		);
 	}
 }
