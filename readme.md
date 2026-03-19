@@ -1,4 +1,4 @@
-# @lunaperegrina/meowdb CLI
+# meowdb CLI
 
 ```text
  /\_/\\
